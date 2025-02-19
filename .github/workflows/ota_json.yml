@@ -1,13 +1,15 @@
 name: Generate OTA JSON for LineageOS
 
 on:
-  push:
+  push:  # Runs on every commit & tag push
+    branches:
+      - main  # Modify if needed to match your main development branch
     tags:
-      - "*"
-  workflow_dispatch:  # Allows manual triggering from GitHub Actions
+      - "lineage-*"  # Runs for all releases following "lineage-" naming scheme
+  workflow_dispatch:  # Allows manual triggering
     inputs:
       release_tag:
-        description: "Select the tag for the release"
+        description: "Tag name for the release (e.g., lineage-22.1-20250214-UNOFFICIAL-gts9wifi)"
         required: true
         type: string
 
@@ -20,34 +22,41 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Determine the tag name
-      - name: Set release tag
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "TAG_NAME=${{ inputs.release_tag }}" >> $GITHUB_ENV
-          else
-            echo "TAG_NAME=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          fi
-
-      # Step 3: Extract latest release info
+      # Step 2: Determine the release tag
       - name: Get release info
         id: release
         run: |
-          # Validate tag name
-          if [[ -z "${{ env.TAG_NAME }}" ]]; then
-            echo "ERROR: Release tag is missing!"
+          # Determine release tag based on trigger type
+          if [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
+            RELEASE_TAG="${{ github.event.inputs.release_tag }}"
+          elif [[ -n "${GITHUB_REF_NAME}" ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          else
+            echo "ERROR: Could not determine release tag."
             exit 1
           fi
 
-          # Set up variables
-          RELEASE_TAG=${{ env.TAG_NAME }}
-          OTA_JSON="ota.json"
+          echo "TAG_NAME=$RELEASE_TAG" >> $GITHUB_ENV
+
+          # Extract device and version info from the tag
           DEVICE_NAME="gts9wifi"
           ROM_TYPE="UNOFFICIAL"
-          VERSION="22.0"
 
-          # Define release URL
-          DOWNLOAD_URL="https://github.com/samsung-sm8550-tab/releases/download/$RELEASE_TAG/lineage-$VERSION-$RELEASE_TAG-$ROM_TYPE-$DEVICE_NAME.zip"
+          # Extract version from tag name (assumes format: lineage-22.1-YYYYMMDD-UNOFFICIAL-gts9wifi)
+          VERSION=$(echo "$RELEASE_TAG" | grep -oP 'lineage-\K[0-9]+(\.[0-9]+)?')
+
+          if [[ -z "$VERSION" ]]; then
+            echo "ERROR: Could not determine version from tag."
+            exit 1
+          fi
+
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      # Step 3: Construct OTA JSON data
+      - name: Generate OTA JSON
+        run: |
+          OTA_JSON="ota.json"
+          DOWNLOAD_URL="https://github.com/samsung-sm8550-tab/releases/download/${{ env.TAG_NAME }}/lineage-${{ env.VERSION }}-${{ env.TAG_NAME }}-UNOFFICIAL-${DEVICE_NAME}.zip"
 
           # Fetch file size
           SIZE=$(curl -sI $DOWNLOAD_URL | grep -i Content-Length | awk '{print $2}' | tr -d '\r')
@@ -58,18 +67,18 @@ jobs:
           # Generate timestamp
           TIMESTAMP=$(date +%s)
 
-          # Write OTA JSON
+          # Generate OTA JSON
           cat <<EOF > $OTA_JSON
           {
             "response": [
               {
                 "datetime": $TIMESTAMP,
-                "filename": "lineage-$VERSION-$RELEASE_TAG-$ROM_TYPE-$DEVICE_NAME.zip",
+                "filename": "lineage-${{ env.VERSION }}-${{ env.TAG_NAME }}-UNOFFICIAL-${DEVICE_NAME}.zip",
                 "id": "$MD5",
-                "romtype": "$ROM_TYPE",
+                "romtype": "UNOFFICIAL",
                 "size": $SIZE,
                 "url": "$DOWNLOAD_URL",
-                "version": "$VERSION"
+                "version": "${{ env.VERSION }}"
               }
             ]
           }
