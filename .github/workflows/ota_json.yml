@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "*"
+  workflow_dispatch:  # Allows manual triggering from GitHub Actions
+    inputs:
+      release_tag:
+        description: "Select the tag for the release"
+        required: true
+        type: string
 
 jobs:
   generate-ota-json:
@@ -14,15 +20,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Extract latest release info
+      # Step 2: Determine the tag name
+      - name: Set release tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "TAG_NAME=${{ inputs.release_tag }}" >> $GITHUB_ENV
+          else
+            echo "TAG_NAME=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          fi
+
+      # Step 3: Extract latest release info
       - name: Get release info
         id: release
         run: |
-          # Extract tag name
-          echo "TAG_NAME=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          
+          # Validate tag name
+          if [[ -z "${{ env.TAG_NAME }}" ]]; then
+            echo "ERROR: Release tag is missing!"
+            exit 1
+          fi
+
           # Set up variables
-          RELEASE_TAG=${GITHUB_REF_NAME}
+          RELEASE_TAG=${{ env.TAG_NAME }}
           OTA_JSON="ota.json"
           DEVICE_NAME="gts9wifi"
           ROM_TYPE="UNOFFICIAL"
@@ -57,16 +75,16 @@ jobs:
           }
           EOF
 
-      # Step 3: Upload the OTA JSON file as an artifact (Updated to v4)
+      # Step 4: Upload the OTA JSON file as an artifact
       - name: Upload OTA JSON
         uses: actions/upload-artifact@v4
         with:
           name: ota-json
           path: ota.json
 
-      # Optional: Commit and push OTA JSON to repository
+      # Step 5: Commit and push OTA JSON to repository
       - name: Commit and push OTA JSON
-        if: ${{ github.event_name == 'push' }}
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
