@@ -1,17 +1,10 @@
 name: Generate OTA JSON for LineageOS
 
 on:
-  push:  # Runs on every commit & tag push
+  push:  # Runs on every commit
     branches:
-      - main  # Modify if needed to match your main development branch
-    tags:
-      - "lineage-*"  # Runs for all releases following "lineage-" naming scheme
-  workflow_dispatch:  # Allows manual triggering
-    inputs:
-      release_tag:
-        description: "Tag name for the release (e.g., lineage-22.1-20250214-UNOFFICIAL-gts9wifi)"
-        required: true
-        type: string
+      - main  # Modify if needed
+  workflow_dispatch:  # Allows manual trigger
 
 jobs:
   generate-ota-json:
@@ -22,75 +15,106 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Determine the release tag
-      - name: Get release info
-        id: release
+      # Step 2: Fetch the latest release tag from GitHub API
+      - name: Get latest release info
+        id: latest_release
         run: |
-          echo "DEBUG: Checking release tag source..."
+          echo "=============================================="
+          echo "🔍 FETCHING LATEST RELEASE FROM GITHUB API..."
+          echo "=============================================="
 
-          # Determine release tag based on trigger type
-          if [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
-            RELEASE_TAG="${{ github.event.inputs.release_tag }}"
-            echo "DEBUG: Manually triggered, using input release tag: $RELEASE_TAG"
-          elif [[ -n "${GITHUB_REF_NAME}" ]]; then
-            RELEASE_TAG="${GITHUB_REF_NAME}"
-            echo "DEBUG: Using GitHub ref name as release tag: $RELEASE_TAG"
-          else
-            echo "ERROR: Could not determine release tag."
+          API_URL="https://api.github.com/repos/${{ github.repository }}/releases/latest"
+          echo "📡 API Request URL: $API_URL"
+
+          RESPONSE=$(curl -s $API_URL)
+
+          if [[ -z "$RESPONSE" ]]; then
+            echo "❌ ERROR: Failed to fetch release data. Exiting."
             exit 1
           fi
 
+          echo "✅ SUCCESS: Fetched release data."
+          echo "📜 RAW API RESPONSE:"
+          echo "$RESPONSE" | jq
+
+          # Extract release tag
+          RELEASE_TAG=$(echo "$RESPONSE" | jq -r .tag_name)
+          if [[ -z "$RELEASE_TAG" || "$RELEASE_TAG" == "null" ]]; then
+            echo "❌ ERROR: Could not fetch latest release tag. Exiting."
+            exit 1
+          fi
+          echo "📌 RELEASE TAG FOUND: $RELEASE_TAG"
           echo "TAG_NAME=$RELEASE_TAG" >> $GITHUB_ENV
 
-          # Extract device and version info from the tag
-          DEVICE_NAME="gts9wifi"
-          ROM_TYPE="UNOFFICIAL"
+          # Extract OTA file details
+          echo "🔎 Searching for OTA ZIP file in release assets..."
+          ASSET_URL=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url')
+          FILE_NAME=$(basename "$ASSET_URL")
 
-          # Extract version from tag name (assumes format: lineage-22.1-YYYYMMDD-UNOFFICIAL-gts9wifi)
-          VERSION=$(echo "$RELEASE_TAG" | grep -oP 'lineage-\K[0-9]+(\.[0-9]+)?' || echo "")
-
-          if [[ -z "$VERSION" ]]; then
-            echo "ERROR: Could not determine version from tag ($RELEASE_TAG)."
+          if [[ -z "$ASSET_URL" || "$ASSET_URL" == "null" ]]; then
+            echo "❌ ERROR: Could not find a valid OTA zip file in assets. Exiting."
             exit 1
           fi
 
+          echo "📂 OTA ZIP FILE FOUND: $FILE_NAME"
+          echo "🌍 OTA FILE URL: $ASSET_URL"
+
+          echo "ASSET_URL=$ASSET_URL" >> $GITHUB_ENV
+          echo "FILENAME=$FILE_NAME" >> $GITHUB_ENV
+
+          # Extract file size
+          SIZE=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name | endswith(".zip")) | .size')
+          echo "📏 FILE SIZE: $SIZE bytes"
+          echo "SIZE=$SIZE" >> $GITHUB_ENV
+
+          # Extract version from tag name
+          echo "🔍 Extracting Android version from release tag..."
+          VERSION=$(echo "$RELEASE_TAG" | grep -oP 'lineage-\K[0-9]+(\.[0-9]+)?')
+
+          if [[ -z "$VERSION" ]]; then
+            echo "❌ ERROR: Could not determine version from tag ($RELEASE_TAG). Exiting."
+            exit 1
+          fi
+
+          echo "✅ ANDROID VERSION FOUND: $VERSION"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
-          # Debugging outputs
-          echo "DEBUG: TAG_NAME = $RELEASE_TAG"
-          echo "DEBUG: VERSION = $VERSION"
-
-      # Step 3: Construct OTA JSON data
+      # Step 3: Generate OTA JSON
       - name: Generate OTA JSON
         run: |
+          echo "=============================================="
+          echo "📦 GENERATING OTA JSON FILE..."
+          echo "=============================================="
+
           OTA_JSON="ota.json"
-          DOWNLOAD_URL="https://github.com/samsung-sm8550-tab/releases/download/${{ env.TAG_NAME }}/lineage-${{ env.VERSION }}-${{ env.TAG_NAME }}-UNOFFICIAL-${DEVICE_NAME}.zip"
 
-          # Fetch file size
-          SIZE=$(curl -sI $DOWNLOAD_URL | grep -i Content-Length | awk '{print $2}' | tr -d '\r')
+          echo "🔍 Calculating MD5 checksum for verification..."
+          MD5=$(curl -sL "${{ env.ASSET_URL }}" | md5sum | awk '{print $1}')
+          echo "🔑 MD5 CHECKSUM: $MD5"
 
-          # Fetch MD5 checksum
-          MD5=$(curl -sL $DOWNLOAD_URL | md5sum | awk '{print $1}')
-
-          # Generate timestamp
+          echo "⏳ Generating timestamp..."
           TIMESTAMP=$(date +%s)
+          echo "📅 TIMESTAMP: $TIMESTAMP"
 
-          # Generate OTA JSON
+          echo "✍️ Writing OTA JSON file..."
           cat <<EOF > $OTA_JSON
           {
             "response": [
               {
                 "datetime": $TIMESTAMP,
-                "filename": "lineage-${{ env.VERSION }}-${{ env.TAG_NAME }}-UNOFFICIAL-${DEVICE_NAME}.zip",
+                "filename": "${{ env.FILENAME }}",
                 "id": "$MD5",
                 "romtype": "UNOFFICIAL",
-                "size": $SIZE,
-                "url": "$DOWNLOAD_URL",
+                "size": ${{ env.SIZE }},
+                "url": "${{ env.ASSET_URL }}",
                 "version": "${{ env.VERSION }}"
               }
             ]
           }
           EOF
+
+          echo "✅ SUCCESS: OTA JSON File Created!"
+          cat ota.json | jq
 
       # Step 4: Upload the OTA JSON file as an artifact
       - name: Upload OTA JSON
@@ -103,8 +127,20 @@ jobs:
       - name: Commit and push OTA JSON
         if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
         run: |
+          echo "=============================================="
+          echo "🚀 COMMITTING & PUSHING OTA JSON TO REPO..."
+          echo "=============================================="
+
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
+
+          echo "📂 Staging ota.json for commit..."
           git add ota.json
-          git commit -m "Add OTA JSON for release ${{ env.TAG_NAME }}"
+          
+          echo "✍️ Creating commit..."
+          git commit -m "Add OTA JSON for latest release ${{ env.TAG_NAME }}"
+
+          echo "📤 Pushing commit to repository..."
           git push origin HEAD:${{ github.ref_name }}
+
+          echo "✅ SUCCESS: OTA JSON pushed to repository!"
